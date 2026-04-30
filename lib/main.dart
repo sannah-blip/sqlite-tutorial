@@ -1,6 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart' as p;
+import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
+import 'package:flutter/foundation.dart';
 
 void main() {
+  // Initialize FFI for web support without a shared worker.
+  // This avoids the need to ship the worker binary file.
+  if (kIsWeb) {
+    databaseFactory = databaseFactoryFfiWebNoWebWorker;
+  }
+
   runApp(const MainApp());
 }
 
@@ -9,10 +19,107 @@ class MainApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(home: ListUserDataPage());
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Flutter SQLite Demo',
+      theme: ThemeData(primarySwatch: Colors.blue),
+      home: const ListUserDataPage(),
+    );
   }
 }
 
+
+class UserModel {
+  int? id;
+  String nama;
+  int umur;
+
+  UserModel({this.id, required this.nama, required this.umur});
+
+  
+  factory UserModel.fromJson(Map<String, dynamic> json) {
+    return UserModel(
+      id: json["id"],
+      nama: json["nama"],
+      umur: json["umur"],
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      "id": id,
+      "nama": nama,
+      "umur": umur,
+    };
+  }
+}
+
+
+class DatabaseHelper {
+  static Database? _database;
+
+  static Future<Database> get database async {
+    if (_database != null) return _database!;
+    _database = await _initDB();
+    return _database!;
+  }
+
+  static Future<Database> _initDB() async {
+    String path;
+    if (kIsWeb) {
+      path = 'user_db.db';
+    } else {
+      path = p.join(await getDatabasesPath(), "user_db.db");
+    }
+    print("Initializing database at path: $path");
+
+    return await openDatabase(
+      path,
+      version: 1,
+      onCreate: (db, version) {
+        print("Creating table users");
+        return db.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, nama TEXT, umur INTEGER)");
+      },
+    );
+  }
+
+
+  static Future<int> insertData(UserModel user) async {
+    final db = await database;
+    print("Inserting into database: ${user.nama}");
+    return await db.insert(
+      "users",
+      user.toJson(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+
+  static Future<List<UserModel>> getData() async {
+    final db = await database;
+    final List<Map<String, dynamic>> result = await db.query("users");
+    print("Queried ${result.length} users from database");
+    return result.map((userMap) => UserModel.fromJson(userMap)).toList();
+  }
+
+
+  static Future<int> updateData(int id, UserModel userModel) async {
+    final db = await database;
+    var data = userModel.toJson();
+    data.remove('id'); // Menghapus ID agar tidak terjadi konflik saat update
+
+    return await db.update("users", data, where: "id = ?", whereArgs: [id]);
+  }
+
+  
+  static Future<int> deleteData(int id) async {
+    final db = await database;
+    return await db.delete("users", where: "id = ?", whereArgs: [id]);
+  }
+}
+
+// --- UI PAGE ---
 class ListUserDataPage extends StatefulWidget {
   const ListUserDataPage({super.key});
 
@@ -20,60 +127,67 @@ class ListUserDataPage extends StatefulWidget {
   State<ListUserDataPage> createState() => _ListUserDataPageState();
 }
 
-class UserModel {
-  int? id;
-  String nama = "";
-  int umur = 0;
-
-  UserModel({this.id, required this.nama, required this.umur});
-}
-
 class _ListUserDataPageState extends State<ListUserDataPage> {
-  final TextEditingController _nameCTRL = TextEditingController();
-  final TextEditingController _umurCTRL = TextEditingController();
+  final TextEditingController _nameCtrl = TextEditingController();
+  final TextEditingController _umurCtrl = TextEditingController();
 
-  List<UserModel> userList = [
-    UserModel(id: 1, nama: "sat", umur: 10),
-    UserModel(id: 2, nama: "du", umur: 20),
-    UserModel(id: 3, nama: "tig", umur: 10),
-    UserModel(id: 4, nama: "empa", umur: 40),
-  ];
+  List<UserModel> userList = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _reloadData(); 
+  }
+
+
+  void _reloadData() async {
+    try {
+      var users = await DatabaseHelper.getData();
+      print("Loaded users: ${users.length}");
+      setState(() {
+        userList = users;
+      });
+    } catch (e) {
+      print("Error loading data: $e");
+    }
+  }
+
 
   void _form(int? id) {
     if (id != null) {
       var user = userList.firstWhere((data) => data.id == id);
-      _nameCTRL.text = user.nama;
-      _umurCTRL.text = user.umur.toString();
+      _nameCtrl.text = user.nama;
+      _umurCtrl.text = user.umur.toString();
     } else {
-      _nameCTRL.clear();
-      _umurCTRL.clear();
+      _nameCtrl.clear();
+      _umurCtrl.clear();
     }
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       builder: (context) => Padding(
-        padding: EdgeInsetsGeometry.fromLTRB(
-          20,
-          20,
-          20,
-          MediaQuery.of(context).viewInsets.bottom + 50,
-        ),
+        padding: EdgeInsets.fromLTRB(
+            20, 20, 20, MediaQuery.of(context).viewInsets.bottom + 50),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             TextField(
-              controller: _nameCTRL,
-              decoration: InputDecoration(hintText: "Nama"),
-            ),
+                controller: _nameCtrl,
+                decoration: const InputDecoration(hintText: "Nama")),
             TextField(
-              controller: _umurCTRL,
-              decoration: InputDecoration(hintText: "Umur"),
+              controller: _umurCtrl,
+              decoration: const InputDecoration(hintText: "Umur"),
               keyboardType: TextInputType.number,
             ),
+            const SizedBox(height: 20),
             ElevatedButton(
-              onPressed: () =>
-                  _save(id, _nameCTRL.text, int.parse(_umurCTRL.text)),
-              child: Text(id == null ? "tambah": "perbarui"),
+              onPressed: () {
+                if (_nameCtrl.text.isNotEmpty && _umurCtrl.text.isNotEmpty) {
+                  _save(id, _nameCtrl.text, int.parse(_umurCtrl.text));
+                }
+              },
+              child: Text(id == null ? "Tambah" : "Perbaharui"),
             ),
           ],
         ),
@@ -81,44 +195,57 @@ class _ListUserDataPageState extends State<ListUserDataPage> {
     );
   }
 
-  void _save(int? id, String nama, int umur) {
-    if (id!=null){
-      var user = userList.firstWhere((data) => data.id == id);
-      setState(() {
-        user.nama = nama;
-        user.umur = umur;
-      });
+  // Fungsi Simpan (Insert atau Update)
+  void _save(int? id, String nama, int umur) async {
+    try {
+      if (id != null) {
+        await DatabaseHelper.updateData(id, UserModel(nama: nama, umur: umur));
+        print("Data updated: $nama, $umur");
+      } else {
+        await DatabaseHelper.insertData(UserModel(nama: nama, umur: umur));
+        print("Data inserted: $nama, $umur");
+      }
 
-    }else{
-    var nextId = userList.length + 1;
-    var newuser = UserModel(id: nextId, nama: nama, umur: umur);
-    setState(() {
-      userList.add(newuser);
-    });
+      _reloadData(); // Refresh list di layar utama
+      if (mounted) Navigator.pop(context); // Tutup Bottom Sheet
+    } catch (e) {
+      print("Error saving data: $e");
+      // Show error dialog
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text("Error"),
+          content: Text("Failed to save data: $e"),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text("OK"),
+            ),
+          ],
+        ),
+      );
     }
-    Navigator.pop(context);
   }
 
+  // Fungsi Hapus dengan Dialog Konfirmasi
   void _delete(int id) {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text("konfirmasi Hapus"),
-        content: Text("apakah anda yakin ingin menghapus data ini?"),
+        title: const Text("Konfirmasi Hapus"),
+        content: const Text("Apakah anda yakin ingin menghapus data ini?"),
         actions: [
           TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-            },
-            child: Text("batal"),
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Batal"),
           ),
           TextButton(
-
-            onPressed:(){
-              setState(() => userList.removeWhere((data) => data.id. == id));
-              Navigator.pop(context);
+            onPressed: () async {
+              await DatabaseHelper.deleteData(id);
+              _reloadData();
+              if (mounted) Navigator.pop(context); // Tutup Dialog
             },
-            child: Text("hapus"),
+            child: const Text("Hapus"),
           ),
         ],
       ),
@@ -128,30 +255,34 @@ class _ListUserDataPageState extends State<ListUserDataPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('user list')),
-      body: ListView.builder(
-        itemCount: userList.length,
-        itemBuilder: (ctx, i) => ListTile(
-          title: Text(userList[i].nama),
-          subtitle: Text("umur: ${userList[i].umur} tahun"),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextButton(
-                onPressed: () => _form(userList[i].id as int),
-                child: Icon(Icons.edit),
-              ),
-              TextButton(
-                onPressed: () => _delete(userList[i].id as int),
-                child: Icon(Icons.delete),
-              ),
-            ],
-          ),
-        ),
+      appBar: AppBar(
+        title: const Text("User List"),
       ),
+      body: userList.isEmpty
+          ? const Center(child: Text("Data kosong. Klik + untuk menambah."))
+          : ListView.builder(
+              itemCount: userList.length,
+              itemBuilder: (context, i) => ListTile(
+                title: Text(userList[i].nama),
+                subtitle: Text("Umur: ${userList[i].umur} tahun"),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.edit, color: Colors.blue),
+                      onPressed: () => _form(userList[i].id),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete, color: Colors.red),
+                      onPressed: () => _delete(userList[i].id!),
+                    ),
+                  ],
+                ),
+              ),
+            ),
       floatingActionButton: FloatingActionButton(
         onPressed: () => _form(null),
-        child: Icon(Icons.add),
+        child: const Icon(Icons.add),
       ),
     );
   }
